@@ -67,28 +67,32 @@ trait Helpers
     /**
      * @return array
      */
-    public static function FixedCSVHeader() {
+    public static function FixedCSVHeader()
+    {
         return ["master_company_id", "country_code", "jurisdiction", "product_code", "description", "alternate_product_code", "terminal_code", "tax_code", "alternate_effective_date", "alternate_obsolete_date", "product_effective_date", "product_obsolete_date"];
     }
 
     /**
      * @return array
      */
-    public static function devContactEmails() {
+    public static function devContactEmails()
+    {
         return ["satish@praella.com", "sameer@praella.com"];
     }
 
     /**
      * @return string
      */
-    public static function startTime() {
+    public static function startTime()
+    {
         return " 00:00:00";
     }
 
     /**
      * @return string
      */
-    public static function endTime() {
+    public static function endTime()
+    {
         return " 23:59:59";
     }
 
@@ -97,9 +101,10 @@ trait Helpers
      * @param $orderId
      * @param $totalExcise
      */
-    public static function orderEdit($shop, $orderId, $totalExcise) {
+    public static function orderEdit($shop, $orderId, $totalExcise)
+    {
         $beginEditQuery = 'mutation beginEdit{
-            orderEditBegin(id: "gid://shopify/Order/'.$orderId.'"){
+            orderEditBegin(id: "gid://shopify/Order/' . $orderId . '"){
                 calculatedOrder{
                     id
                 }
@@ -117,9 +122,10 @@ trait Helpers
      * @param $orderId
      * @param $totalExcise
      */
-    public static function addCustomItemToOrder($shop, $calculateOrderId, $orderId, $totalExcise) {
+    public static function addCustomItemToOrder($shop, $calculateOrderId, $orderId, $totalExcise)
+    {
         $addCustomItemToOrderQuery = 'mutation addCustomItemToOrder {
-            orderEditAddCustomItem(id: "'.$calculateOrderId.'", title: "Excise Tax", quantity: 1, price: {amount: '.$totalExcise.', currencyCode: '.$shop->currency.'}) {
+            orderEditAddCustomItem(id: "' . $calculateOrderId . '", title: "Excise Tax", quantity: 1, price: {amount: ' . $totalExcise . ', currencyCode: ' . $shop->currency . '}) {
                 calculatedOrder {
                     id
                     addedLineItems(first: 5) {
@@ -141,11 +147,11 @@ trait Helpers
         $addedLineItems = $customLineItem['addedLineItems']['edges'];
         $isAddItem = false;
         foreach ($addedLineItems as $addedLineItem) {
-            if($addedLineItem['node']['id']) {
+            if ($addedLineItem['node']['id']) {
                 $isAddItem = true;
             }
         }
-        if($isAddItem) {
+        if ($isAddItem) {
             Helpers::orderEditCommit($shop, $calculateOrderId);
         }
     }
@@ -154,9 +160,10 @@ trait Helpers
      * @param $shop
      * @param $calculateOrderId
      */
-    public static function orderEditCommit($shop, $calculateOrderId) {
+    public static function orderEditCommit($shop, $calculateOrderId)
+    {
         $orderEditCommitQuery = 'mutation commitEdit {
-          orderEditCommit(id: "'.$calculateOrderId.'", notifyCustomer: true, staffNote: "Due excise tax") {
+          orderEditCommit(id: "' . $calculateOrderId . '", notifyCustomer: true, staffNote: "Due excise tax") {
             order {
               id
             }
@@ -178,133 +185,126 @@ trait Helpers
      * @return mixed
      * @throws \GuzzleHttp\Exception\GuzzleException
      */
-    public static function calculateExcise($shop, $orderId) {
-        $orderRes = $shop->api()->rest('GET', '/admin/orders/'.$orderId.'.json');
+    public static function calculateExcise($shop, $orderId)
+    {
+        $orderRes = $shop->api()->rest('GET', '/admin/orders/' . $orderId . '.json');
         if (isset($orderRes['body']['order'])) {
             $orderData = $orderRes['body']['order'];
 
-            //if (!empty($orderData['note_attributes'])) {
-                //foreach ($orderData['note_attributes'] as $noteAttribute) {
-                    //if ($noteAttribute['name'] === 'transaction_id') {
+            $staticSettings = StaticSetting::where('shop_id', $shop->id)->get();
 
-                        $staticSettings = StaticSetting::where('shop_id', $shop->id)->get();
+            // Static Settings
+            $getStaticSettings = (new self)->commonStaticSettings($staticSettings, $orderData);
 
-                        // Static Settings
-                        $getStaticSettings = (new self)->commonStaticSettings($staticSettings, $orderData);
+            $getCustomAndLineFields = (new self)->commonOrderAndLineItemsCustomField($staticSettings);
 
-                        $getCustomAndLineFields = (new self)->commonOrderAndLineItemsCustomField($staticSettings);
+            //Avalara Credential
+            $avalaraCredential = AvalaraCredential::where('shop_id', $shop->id)->first();
+            $companyId = $avalaraCredential->company_id;
+            $apiUsername = $avalaraCredential->username;
+            $apiUserPassword = $avalaraCredential->password;
 
-                        //Avalara Credential
-                        $avalaraCredential = AvalaraCredential::where('shop_id', $shop->id)->first();
-                        $companyId = $avalaraCredential->company_id;
-                        $apiUsername = $avalaraCredential->username;
-                        $apiUserPassword = $avalaraCredential->password;
+            //setting for excise calculation
+            $productForExcise = ProductForExcise::where('shop_id', $shop->id)->first();
+            $productIdentifierForExcise = ProductIdentifierForExcise::where('shop_id', $shop->id)->first();
 
-                        //setting for excise calculation
-                        $productForExcise = ProductForExcise::where('shop_id', $shop->id)->first();
-                        $productIdentifierForExcise = ProductIdentifierForExcise::where('shop_id', $shop->id)->first();
+            $invoiceDate = Carbon::parse($orderData['created_at'])->format('Y-m-d H:i:s');
+            $transactionLines = $variantIds = $productIds = $past_fulfilled_items = [];
+            $itemCounter = 0;
 
-                        $invoiceDate = Carbon::parse($orderData['created_at'])->format('Y-m-d H:i:s');
-                        $transactionLines = $variantIds = $productIds = $past_fulfilled_items = [];
-                        $itemCounter = 0;
+            if (!empty($orderData['line_items'])) {
+                foreach ($orderData['line_items'] as $line_item) {
+                    if (!empty($line_item['sku'])) {
 
-                        if (!empty($orderData['line_items'])) {
-                            foreach ($orderData['line_items'] as $line_item) {
-                                if (!empty($line_item['sku'])) {
-
-                                    $productTags = $shop->api()->rest('GET', '/admin/products/'.$line_item['product_id'].'.json');
-                                    if(isset($productTags['body']['product']) && !empty($productTags['body']['product'])) {
-                                        $productTags = $productTags['body']['product']['tags'];
-                                    }
-                                    $item['ProductCode'] = $item['itemSKU'] = Str::substr($line_item['sku'], 0, 24);
-                                    $item['tags'] = $productTags;
-                                    //return $item;
-                                    if (!filterRequest($item, $productForExcise, $productIdentifierForExcise)) {
-                                        continue;
-                                    }
-                                    $variantIds[] = $line_item['variant_id'];
-                                    $productIds[] = $line_item['product_id'];
-
-                                    $transactionLines[] = [
-                                        "TransactionLineMeasures" => null,
-                                        "OriginSpecialJurisdictions" => [],
-                                        "DestinationSpecialJurisdictions" => [],
-                                        "SaleSpecialJurisdictions" => [],
-                                        "InvoiceLine" => ++$itemCounter,
-                                        "ProductCode" => $line_item['sku'] ? Str::substr($line_item['sku'], 0, 24) : '',
-                                        "UnitPrice" => $line_item['price'],
-                                        "NetUnits" => $line_item['quantity'],
-                                        "GrossUnits" => $line_item['quantity'],
-                                        "BilledUnits" => $line_item['quantity'],
-                                        "BillOfLadingDate" => $invoiceDate,
-                                        "Origin" => $getStaticSettings['origin'],
-                                        "OriginAddress1" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['address1'] : '',
-                                        "OriginAddress2" => null,
-                                        "DestinationCountryCode" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['country_code'] : '',
-                                        "DestinationJurisdiction" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['province_code'] : '',
-                                        "DestinationCounty" => "",
-                                        "DestinationCity" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['city'] : '',
-                                        "DestinationPostalCode" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['zip'] : '',
-                                        "DestinationAddress1" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['address1'] : '',
-                                        "DestinationAddress2" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['address2'] : '',
-                                        "Currency" => $getStaticSettings['currency'],
-                                        "UnitOfMeasure" => $getStaticSettings['unitOfMeasure'],
-                                        "CustomString1" => $getCustomAndLineFields['itemCustomString1'] ? Helpers::getCustomString($getCustomAndLineFields['itemCustomString1']->value, $orderData) : null,
-                                        "CustomString2" => $getCustomAndLineFields['itemCustomString2'] ? Helpers::getCustomString($getCustomAndLineFields['itemCustomString2']->value, $orderData) : null,
-                                        "CustomString3" => $getCustomAndLineFields['itemCustomString3'] ? Helpers::getCustomString($getCustomAndLineFields['itemCustomString3']->value, $orderData) : null,
-                                        "CustomNumeric1" => $getCustomAndLineFields['itemCustomNumeric1'] ? Helpers::getCustomNumeric($getCustomAndLineFields['itemCustomNumeric1']->value, $orderData) : null,
-                                        "CustomNumeric2" => $getCustomAndLineFields['itemCustomNumeric2'] ? Helpers::getCustomNumeric($getCustomAndLineFields['itemCustomNumeric2']->value, $orderData) : null,
-                                        "CustomNumeric3" => $getCustomAndLineFields['itemCustomNumeric3'] ? Helpers::getCustomNumeric($getCustomAndLineFields['itemCustomNumeric3']->value, $orderData) : null,
-                                        //"AlternateUnitPrice" => getVariant($shop->name, $line_item['variant_id']),
-                                    ];
-                                }
-                            }
+                        $productTags = $shop->api()->rest('GET', '/admin/products/' . $line_item['product_id'] . '.json');
+                        if (isset($productTags['body']['product']) && !empty($productTags['body']['product'])) {
+                            $productTags = $productTags['body']['product']['tags'];
                         }
+                        $item['ProductCode'] = $item['itemSKU'] = Str::substr($line_item['sku'], 0, 24);
+                        $item['tags'] = $productTags;
+                        //return $item;
+                        if (!filterRequest($item, $productForExcise, $productIdentifierForExcise)) {
+                            continue;
+                        }
+                        $variantIds[] = $line_item['variant_id'];
+                        $productIds[] = $line_item['product_id'];
 
-                        $requestDataAdjust = [
-                            'TransactionLines' => $transactionLines,
-                            'TransactionExchangeRates' => [],
-                            'EffectiveDate' => $invoiceDate,
-                            'InvoiceDate' => $invoiceDate,
-                            'InvoiceNumber' => "",//$orderData['order_number'],
-                            'TitleTransferCode' => $getStaticSettings['titleTransferCode'],
-                            'TransactionType' => $getStaticSettings['transactionType'],
-                            'TransportationModeCode' => $getStaticSettings['transportationModeCode'],
-                            'Seller' => $getStaticSettings['seller'],
-                            'Buyer' => $getStaticSettings['buyer'],
-                            'CustomString1' => $getCustomAndLineFields['orderCustomString1'] ? Helpers::getCustomString($getCustomAndLineFields['orderCustomString1']->value, $orderData) : null,
-                            'CustomString2' => $getCustomAndLineFields['orderCustomString2'] ? Helpers::getCustomString($getCustomAndLineFields['orderCustomString2']->value, $orderData) : null,
-                            'CustomString3' => $getCustomAndLineFields['orderCustomString3'] ? Helpers::getCustomString($getCustomAndLineFields['orderCustomString3']->value, $orderData) : null,
-                            'CustomNumeric1' => $getCustomAndLineFields['orderCustomNumeric1'] ? Helpers::getCustomNumeric($getCustomAndLineFields['orderCustomNumeric1']->value, $orderData) : null,
-                            'CustomNumeric2' => $getCustomAndLineFields['orderCustomNumeric2'] ? Helpers::getCustomNumeric($getCustomAndLineFields['orderCustomNumeric2']->value, $orderData) : null,
-                            'CustomNumeric3' => $getCustomAndLineFields['orderCustomNumeric3'] ? Helpers::getCustomNumeric($getCustomAndLineFields['orderCustomNumeric3']->value, $orderData) : null,
+                        $transactionLines[] = [
+                            "TransactionLineMeasures" => null,
+                            "OriginSpecialJurisdictions" => [],
+                            "DestinationSpecialJurisdictions" => [],
+                            "SaleSpecialJurisdictions" => [],
+                            "InvoiceLine" => ++$itemCounter,
+                            "ProductCode" => $line_item['sku'] ? Str::substr($line_item['sku'], 0, 24) : '',
+                            "UnitPrice" => $line_item['price'],
+                            "NetUnits" => $line_item['quantity'],
+                            "GrossUnits" => $line_item['quantity'],
+                            "BilledUnits" => $line_item['quantity'],
+                            "BillOfLadingDate" => $invoiceDate,
+                            "Origin" => $getStaticSettings['origin'],
+                            "OriginAddress1" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['address1'] : '',
+                            "OriginAddress2" => null,
+                            "DestinationCountryCode" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['country_code'] : '',
+                            "DestinationJurisdiction" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['province_code'] : '',
+                            "DestinationCounty" => "",
+                            "DestinationCity" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['city'] : '',
+                            "DestinationPostalCode" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['zip'] : '',
+                            "DestinationAddress1" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['address1'] : '',
+                            "DestinationAddress2" => isset($orderData['shipping_address']) ? $orderData['shipping_address']['address2'] : '',
+                            "Currency" => $getStaticSettings['currency'],
+                            "UnitOfMeasure" => $getStaticSettings['unitOfMeasure'],
+                            "CustomString1" => $getCustomAndLineFields['itemCustomString1'] ? Helpers::getCustomString($getCustomAndLineFields['itemCustomString1']->value, $orderData) : null,
+                            "CustomString2" => $getCustomAndLineFields['itemCustomString2'] ? Helpers::getCustomString($getCustomAndLineFields['itemCustomString2']->value, $orderData) : null,
+                            "CustomString3" => $getCustomAndLineFields['itemCustomString3'] ? Helpers::getCustomString($getCustomAndLineFields['itemCustomString3']->value, $orderData) : null,
+                            "CustomNumeric1" => $getCustomAndLineFields['itemCustomNumeric1'] ? Helpers::getCustomNumeric($getCustomAndLineFields['itemCustomNumeric1']->value, $orderData) : null,
+                            "CustomNumeric2" => $getCustomAndLineFields['itemCustomNumeric2'] ? Helpers::getCustomNumeric($getCustomAndLineFields['itemCustomNumeric2']->value, $orderData) : null,
+                            "CustomNumeric3" => $getCustomAndLineFields['itemCustomNumeric3'] ? Helpers::getCustomNumeric($getCustomAndLineFields['itemCustomNumeric3']->value, $orderData) : null,
+                            //"AlternateUnitPrice" => getVariant($shop->name, $line_item['variant_id']),
                         ];
+                    }
+                }
+            }
 
-                        if (!empty($transactionLines)) {
-                            $client = new Client();
-                            $headers = [
-                                'Accept' => 'application/json',
-                                'x-company-id' => $companyId
-                            ];
+            $requestDataAdjust = [
+                'TransactionLines' => $transactionLines,
+                'TransactionExchangeRates' => [],
+                'EffectiveDate' => $invoiceDate,
+                'InvoiceDate' => $invoiceDate,
+                'InvoiceNumber' => "",//$orderData['order_number'],
+                'TitleTransferCode' => $getStaticSettings['titleTransferCode'],
+                'TransactionType' => $getStaticSettings['transactionType'],
+                'TransportationModeCode' => $getStaticSettings['transportationModeCode'],
+                'Seller' => $getStaticSettings['seller'],
+                'Buyer' => $getStaticSettings['buyer'],
+                'CustomString1' => $getCustomAndLineFields['orderCustomString1'] ? Helpers::getCustomString($getCustomAndLineFields['orderCustomString1']->value, $orderData) : null,
+                'CustomString2' => $getCustomAndLineFields['orderCustomString2'] ? Helpers::getCustomString($getCustomAndLineFields['orderCustomString2']->value, $orderData) : null,
+                'CustomString3' => $getCustomAndLineFields['orderCustomString3'] ? Helpers::getCustomString($getCustomAndLineFields['orderCustomString3']->value, $orderData) : null,
+                'CustomNumeric1' => $getCustomAndLineFields['orderCustomNumeric1'] ? Helpers::getCustomNumeric($getCustomAndLineFields['orderCustomNumeric1']->value, $orderData) : null,
+                'CustomNumeric2' => $getCustomAndLineFields['orderCustomNumeric2'] ? Helpers::getCustomNumeric($getCustomAndLineFields['orderCustomNumeric2']->value, $orderData) : null,
+                'CustomNumeric3' => $getCustomAndLineFields['orderCustomNumeric3'] ? Helpers::getCustomNumeric($getCustomAndLineFields['orderCustomNumeric3']->value, $orderData) : null,
+            ];
 
-                            $response = $client->post(env('AVALARA_API_ENDPOINT').'/AvaTaxExcise/transactions/create', [
-                                'auth' => [
-                                    $apiUsername, $apiUserPassword
-                                ],
-                                'headers' => $headers,
-                                'json' => $requestDataAdjust
-                            ]);
+            if (!empty($transactionLines)) {
+                $client = new Client();
+                $headers = [
+                    'Accept' => 'application/json',
+                    'x-company-id' => $companyId
+                ];
 
-                            $resData = json_decode($response->getBody());
-                            if ($resData->Status == 'Success') {
-                                return $resData->TotalTaxAmount;
-                            }
-                        }
-                    //}
-                //}
-            //}return "note attributes not found";
+                $response = $client->post(env('AVALARA_API_ENDPOINT') . '/AvaTaxExcise/transactions/create', [
+                    'auth' => [
+                        $apiUsername, $apiUserPassword
+                    ],
+                    'headers' => $headers,
+                    'json' => $requestDataAdjust
+                ]);
+
+                $resData = json_decode($response->getBody());
+                if ($resData->Status == 'Success') {
+                    return $resData->TotalTaxAmount;
+                }
+            }
         }
-        //return $orderRes;
     }
 
     /**
@@ -312,12 +312,13 @@ trait Helpers
      * @param $data
      * @return mixed|string
      */
-    public static function getCustomString($stringType, $data) {
+    public static function getCustomString($stringType, $data)
+    {
         switch ($stringType) {
             case 5:
                 $customerName = '';
                 if ($data['customer']) {
-                    $customerName = $data['customer']['first_name'].' '.$data['customer']['last_name'];
+                    $customerName = $data['customer']['first_name'] . ' ' . $data['customer']['last_name'];
                 }
 
                 return $customerName;
@@ -349,7 +350,7 @@ trait Helpers
      */
     public static function getCustomNumeric($numericType, $data)
     {
-        switch($numericType) {
+        switch ($numericType) {
             case 3:
                 return $data['total_price'];
             case 2:
@@ -369,7 +370,8 @@ trait Helpers
      * @param int $unauthorizeLoaction
      * @return array
      */
-    public static function failoverCheckout($shopId, $unauthorizeLoaction = 0) {
+    public static function failoverCheckout($shopId, $unauthorizeLoaction = 0)
+    {
         $action = $unauthorizeLoaction ? 2 : 1;
         $failover = FailoverCheckout::where([['shop_id', $shopId], ['action', $action]])->first();
 
@@ -387,7 +389,8 @@ trait Helpers
      * @param $status
      * @return int
      */
-    public static function getOrderFulfillmentStatus($status) {
+    public static function getOrderFulfillmentStatus($status)
+    {
         switch ($status) {
             case 'fulfilled':
                 return 1;
@@ -404,8 +407,9 @@ trait Helpers
      * @param $shopId
      * @return array
      */
-    public static function avalaraCredentials($shopId) {
-        $avalaraCredential = AvalaraCredential::where('shop_id',$shopId)->first();
+    public static function avalaraCredentials($shopId)
+    {
+        $avalaraCredential = AvalaraCredential::where('shop_id', $shopId)->first();
         return [$avalaraCredential->company_id, $avalaraCredential->username, $avalaraCredential->password];
     }
 
@@ -413,7 +417,8 @@ trait Helpers
      * @param $shopId
      * @return mixed
      */
-    public static function productForExcise($shopId) {
+    public static function productForExcise($shopId)
+    {
         return ProductForExcise::where('shop_id', $shopId)->first();
     }
 
@@ -421,7 +426,8 @@ trait Helpers
      * @param $shopId
      * @return mixed
      */
-    public static function productIdentifierForExcise($shopId) {
+    public static function productIdentifierForExcise($shopId)
+    {
         return ProductIdentifierForExcise::where('shop_id', $shopId)->first();
     }
 
@@ -429,14 +435,15 @@ trait Helpers
      * @param $shopId
      * @return array
      */
-    public static function additionalField($shopId) {
+    public static function additionalField($shopId)
+    {
         $staticSettings = StaticSetting::where('shop_id', $shopId)->get();
 
         $return = [];
-        for ($i=1; $i <= 20; $i++) {
-            $hasAdditionalField = $staticSettings->where('field', 'additional_custom_option'.$i)->first();
+        for ($i = 1; $i <= 20; $i++) {
+            $hasAdditionalField = $staticSettings->where('field', 'additional_custom_option' . $i)->first();
             if ($hasAdditionalField) {
-                $hasAdditionalFieldValue = $staticSettings->where('field', 'additional_custom_value'.$i)->first();
+                $hasAdditionalFieldValue = $staticSettings->where('field', 'additional_custom_value' . $i)->first();
                 if ($hasAdditionalFieldValue)
                     $return[Helpers::additionalStaticField($hasAdditionalField->value)] = $hasAdditionalFieldValue->value;
             }
@@ -448,7 +455,8 @@ trait Helpers
      * @param $option
      * @return string
      */
-    public static function additionalStaticField($option) {
+    public static function additionalStaticField($option)
+    {
         switch ($option) {
             case 1:
                 return "previous_seller";
@@ -469,7 +477,8 @@ trait Helpers
      * @param $shopId
      * @return array
      */
-    public static function staticSettings($shopId) {
+    public static function staticSettings($shopId)
+    {
         $staticSettings = StaticSetting::where('shop_id', $shopId)->get();
 
         $getStaticSettings = (new self)->commonStaticSettings($staticSettings);
@@ -516,7 +525,7 @@ trait Helpers
         $transportationModeCode = $hasTransportationModeCode ? $hasTransportationModeCode->value : 'J';
         $hasSeller = $staticSettings->where('field', 'seller')->first();
         $seller = $hasSeller ? $hasSeller->value : '';
-        $hasBuyer = $staticSettings->where('field' , 'buyer')->first();
+        $hasBuyer = $staticSettings->where('field', 'buyer')->first();
         $buyer = $hasBuyer ? $hasBuyer->value : '';
         $hasUnitOfMeasure = $staticSettings->where('field', 'unit_of_measure')->first();
         $unitOfMeasure = $hasUnitOfMeasure ? $hasUnitOfMeasure->value : 'EA';
